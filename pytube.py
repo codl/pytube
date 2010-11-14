@@ -4,14 +4,16 @@ import sys
 import pylibmc
 import re
 import hashlib
-import itertools
-import threading
 import urllib2
 import logging
+import subprocess
+import random
 #import cherrypy
 #import pymedia #later
 
-logging.basicConfig(filename="/tmp/ytd.log", level=logging.DEBUG)
+if not os.path.exists("/tmp/pytube"):
+    os.mkdir("/tmp/pytube")
+logging.basicConfig(filename="/tmp/pytube/log", level=logging.DEBUG)
 logging.info("")
 logging.info("-----")
 logging.info("")
@@ -25,6 +27,7 @@ re_token = re.compile('.*"t": "([^"]+)"')
 re_fmtlist = re.compile("fmt_list=([^&]+)")
 
 cacheprefix=0
+
 def cache(func):
     global cacheprefix
     cacheprefix+=1
@@ -37,9 +40,33 @@ def cache(func):
             if data == None:
                 logging.debug("Not found")
                 data = func(*args, **kwargs)
-                mc.set(queryhash, data, 60*5)
-        logging.debug(queryhash+": "+repr(data)[0:150])
+                mc.set(queryhash, data, 60*60*2)
+        logging.debug(queryhash+": "+repr(data)[:150])
         return data
+    return cached
+
+def cache_iter(func):
+    global cacheprefix
+    cacheprefix+=1
+    prefix=cacheprefix
+    def cached(*args, **kwargs):
+        queryhash=hashlib.md5(str(prefix)+repr(args)+repr(kwargs)).hexdigest()
+        with mcpool.reserve() as mc:
+            data = mc.get(queryhash)
+            if data == None:
+                iterator = func(*args, **kwargs)
+                data = []
+                while True:
+                    try:
+                        datachunk = iterator.next()
+                        data.append(datachunk)
+                        yield datachunk
+                    except StopIteration:
+                        break
+                mc.set(queryhash, data, 60*30)
+            else:
+                for i in data:
+                    yield i
     return cached
 
 @cache
@@ -63,7 +90,7 @@ def bestfmt(fmtlist):
     return [best, audiobest]
 
 
-#@cache
+@cache
 def videoinfo(url):
   _vid = re_vid.search(url)
   if _vid == None:
@@ -91,8 +118,9 @@ def videoinfo(url):
 
   return {"vid": vid, "fmtlist": fmtlist, "bestfmt": bestfmt(fmtlist), "token": token} # more metadata later
 
-def videofile(url, audiovideo="video"):
-    info=videoinfo(url)
+@cache
+def videourl(vid, audiovideo="video"):
+    info=videoinfo("v="+vid)
     if audiovideo=="audio":
         fmt=info["bestfmt"][1]
     else:
@@ -101,38 +129,48 @@ def videofile(url, audiovideo="video"):
         logging.critical("Oh no! Aborting")
         return None
     url = "http://www.youtube.com/get_video?asv=&video_id="+info["vid"]+"&t="+info["token"]+"&fmt="+fmt
-    logging.info("Download URL is "+url)
+    return url
+
+def videofile(vid, audiovideo="video"):
+    url = videourl(vid, audiovideo)
     video = urllib2.urlopen(url)
     return video
 
-def downloadvideo(url):
-    remotevid = videofile(url)
-    vidinfo = videoinfo(url)
-    vidfile = io.open("/tmp/" + vidinfo["vid"], "bw")
-
-    vidlen = int(remotevid.info()["Content-length"])
-    blocksize=1024
+#@cache_iter
+def getvideodata(vid, audiovideo="video", blocksize=1024):
+    remote = videofile(vid, audiovideo)
+    vidlen = int(remote.info()["Content-length"])
     datatotal=0
-    prct = 0
+    prct = -1
     while True:
         prevprct = prct
-        data = remotevid.read(blocksize)
+        data = remote.read(blocksize)
         datalen = len(data)
         if datalen == 0:
-            logging.info("End of download")
-            remotevid.close()
-            vidfile.close()
+            logging.info("end of download")
             break
         else:
             datatotal += datalen
             prct = datatotal * 100 / vidlen
             if prevprct < prct:
-                print(str(prct)+"%")
-            vidfile.write(data)
+                logging.info(vid+": "+str(prct)+"%")
+            yield data
+
+#@cache_iter
+def save_mp3(vid):
+    info = videoinfo("v="+vid)
+    filename = "/tmp/pytube/"+vid+".mp3"
+    FFMPEG="ffmpeg -i pipe:0 -vn -acodec libmp3lame -f mp3 -y "+filename
+    ffmpeg = subprocess.Popen(FFMPEG, shell=True, stdin=subprocess.PIPE)
+    for videodata in getvideodata(info["vid"], audiovideo="audio"):
+        ffmpeg.stdin.write(videodata)
+
+
+        
 
 if __name__ == "__main__" and len(sys.argv) > 1:
-    downloadvideo(sys.argv[1])
-    #videofile(sys.argv[1])
+    info=videoinfo(sys.argv[1])
+    save_mp3(info["vid"])
 elif __name__ == "__main__":
     print "No url was supplied on the command line, exiting..."
 
