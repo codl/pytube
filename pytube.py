@@ -1,4 +1,5 @@
 import os
+import threading
 import io
 import sys
 import pylibmc
@@ -7,9 +8,8 @@ import hashlib
 import urllib2
 import logging
 import subprocess
-import random
-#import cherrypy
-#import pymedia #later
+import cherrypy
+from mako.template import Template
 
 if not os.path.exists("/tmp/pytube"):
     os.mkdir("/tmp/pytube")
@@ -18,15 +18,27 @@ logging.info("")
 logging.info("-----")
 logging.info("")
 
+DOMAIN = "http://aquageek.net/y"
 
-mc = pylibmc.Client(["127.0.0.1"], binary=True)
-mcpool = pylibmc.ThreadMappedPool(mc)
+_mc = pylibmc.Client(["127.0.0.1"], binary=True)
+_mcpool = pylibmc.ThreadMappedPool(_mc)
+
+def mcget(key):
+    with _mcpool.reserve() as mc:
+        return mc.get(key)
+
+def mcset(key, value, time=None):
+    with _mcpool.reserve() as mc:
+        if time != None:
+            return mc.set(key, value, time)
+        else:
+            return mc.set(key, value)
 
 re_vid = re.compile(".*v=([^&]+)")
 re_token = re.compile('.*"t": "([^"]+)"')
 re_fmtlist = re.compile("fmt_list=([^&]+)")
 
-cacheprefix=0
+cacheprefix=1
 
 def cache(func):
     global cacheprefix
@@ -35,39 +47,16 @@ def cache(func):
     def cached(*args, **kwargs):
         queryhash=hashlib.md5(str(prefix)+repr(args)+repr(kwargs)).hexdigest()
         logging.debug('Getting '+queryhash+" from memcached")
-        with mcpool.reserve() as mc:
+        with _mcpool.reserve() as mc:
             data = mc.get(queryhash)
             if data == None:
                 logging.debug("Not found")
                 data = func(*args, **kwargs)
-                mc.set(queryhash, data, 60*60*2)
+            mc.set(queryhash, data, 60*30)
         logging.debug(queryhash+": "+repr(data)[:150])
         return data
     return cached
 
-def cache_iter(func):
-    global cacheprefix
-    cacheprefix+=1
-    prefix=cacheprefix
-    def cached(*args, **kwargs):
-        queryhash=hashlib.md5(str(prefix)+repr(args)+repr(kwargs)).hexdigest()
-        with mcpool.reserve() as mc:
-            data = mc.get(queryhash)
-            if data == None:
-                iterator = func(*args, **kwargs)
-                data = []
-                while True:
-                    try:
-                        datachunk = iterator.next()
-                        data.append(datachunk)
-                        yield datachunk
-                    except StopIteration:
-                        break
-                mc.set(queryhash, data, 60*30)
-            else:
-                for i in data:
-                    yield i
-    return cached
 
 @cache
 def urlread(url, timeout=20):
@@ -136,7 +125,6 @@ def videofile(vid, audiovideo="video"):
     video = urllib2.urlopen(url)
     return video
 
-#@cache_iter
 def getvideodata(vid, audiovideo="video", blocksize=1024):
     remote = videofile(vid, audiovideo)
     vidlen = int(remote.info()["Content-length"])
@@ -152,25 +140,71 @@ def getvideodata(vid, audiovideo="video", blocksize=1024):
         else:
             datatotal += datalen
             prct = datatotal * 100 / vidlen
+            mcset("status"+vid, str(prct), 20)
             if prevprct < prct:
                 logging.info(vid+": "+str(prct)+"%")
             yield data
 
-#@cache_iter
+devnull = io.open("/dev/null", "wb")
+
 def save_mp3(vid):
     info = videoinfo("v="+vid)
     filename = "/tmp/pytube/"+vid+".mp3"
     FFMPEG="ffmpeg -i pipe:0 -vn -acodec libmp3lame -f mp3 -y "+filename
-    ffmpeg = subprocess.Popen(FFMPEG, shell=True, stdin=subprocess.PIPE)
+    ffmpeg = subprocess.Popen(FFMPEG, shell=True, stdin=subprocess.PIPE, stdout=devnull, stderr=devnull)
     for videodata in getvideodata(info["vid"], audiovideo="audio"):
         ffmpeg.stdin.write(videodata)
+    mcset("status"+vid, "done")
+    return filename
+
+class Serve:
+    @cherrypy.expose
+    def index(self):
+        html = io.open("index.html").read()
+        return html
+
+    @cherrypy.expose
+    def status(self, vid="NvlW4bEjB5A", _=None):
+        status = mcget("status"+vid)
+        if status == None:
+            mcset("status"+vid, "0", 120)
+            t=threading.Thread(target=save_mp3, args=(vid,))
+            t.start()
+            return "processing..."
+        elif status == "done":
+            return "done"
+        else:
+            return "still processing : "+status+"% done"
+
+    @cherrypy.expose
+    def dl(self, url="v=NvlW4bEjB5A"):
+        if url == "": url="v=NvlW4bEjB5A"
+        vid = videoinfo(url)["vid"]
+        status = mcget("status"+vid)
+        if status == None or (status == "done" and not os.path.exists("/tmp/pytube/"+vid+".mp3")):
+            mcset("status"+vid, "0", 60)
+            t=threading.Thread(target=save_mp3, args=(vid,))
+            t.start()
+            statusstr = "downloading and processing"
+        elif status == "done":
+            statusstr = "<a href='"+DOMAIN+"/y/dlm/"+vid+".mp3'>done</a>"
+        else:
+            statusstr = "still processing : "+status+"% done"
+        html = Template(filename="status.html").render(vid=vid, status=statusstr)
+        return html
 
 
-        
 
-if __name__ == "__main__" and len(sys.argv) > 1:
-    info=videoinfo(sys.argv[1])
-    save_mp3(info["vid"])
-elif __name__ == "__main__":
-    print "No url was supplied on the command line, exiting..."
+#if __name__ == "__main__" and len(sys.argv) > 1:
+    #info=videoinfo(sys.argv[1])
+    #save_mp3(info["vid"])
+#elif __name__ == "__main__":
+    #print "No url was supplied on the command line, exiting..."
 
+if __name__ == "__main__":
+    root = Serve()
+    cherrypy.config.update("config")
+    app=cherrypy.tree.mount(root, "/", "config")
+
+    cherrypy.engine.start()
+    cherrypy.engine.block()
