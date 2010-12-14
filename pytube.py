@@ -117,7 +117,7 @@ def videourl(vid, audiovideo="video"):
     if info == None:
         logging.critical("Oh no! Aborting")
         return None
-    url = "http://www.youtube.com/get_video?asv=&video_id="+info["vid"]+"&t="+info["token"]+"&fmt="+fmt
+    url = "http://www.youtube.com/get_video?el=&asv=&video_id="+info["vid"]+"&t="+info["token"]+"&fmt="+fmt
     return url
 
 def videofile(vid, audiovideo="video"):
@@ -187,7 +187,7 @@ class Serve:
             t.start()
             statusstr = "downloading and processing"
         elif status == "done":
-            statusstr = "<a href='"+DOMAIN+"/y/dlm/"+vid+".mp3'>done</a>"
+            statusstr = "<a href='"+DOMAIN+"/dlm/"+vid+".mp3'>done</a>"
         else:
             statusstr = "still processing : "+status+"% done"
         html = Template(filename="status.html").render(vid=vid, status=statusstr)
@@ -202,9 +202,13 @@ class Serve:
     #print "No url was supplied on the command line, exiting..."
 
 if __name__ == "__main__":
-    root = Serve()
-    cherrypy.config.update("config")
-    app=cherrypy.tree.mount(root, "/", "config")
+    if len(sys.argv) > 1:
+        info=videoinfo(sys.argv[1])
+        save_mp3(info["vid"])
+    else:
+        root = Serve()
+        cherrypy.config.update("config")
+        app=cherrypy.tree.mount(root, "/", "config")
 
-    cherrypy.engine.start()
-    cherrypy.engine.block()
+        cherrypy.engine.start()
+        cherrypy.engine.block()

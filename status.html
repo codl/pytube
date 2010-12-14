@@ -1,0 +1,36 @@
+<!doctype html !>
+<html>
+<head>
+    <title>pytube</title>
+    <script type="text/javascript" src="https://ajax.googleapis.com/ajax/libs/prototype/1.6.1.0/prototype.js"></script>
+    <script type="text/javascript">
+        var vid="${vid}";
+        document.observe("dom:loaded", function() {
+            var pe = new PeriodicalExecuter(function(pe) {
+                new Ajax.Updater('status', '/y/status', {
+                    parameters: { vid: vid },
+                    onComplete: function(response) {
+                        if (response.responseText == "done") {
+                            pe.stop()
+                            document.location="/y/dlm/"+vid+".mp3";
+                        }
+                    }
+                });
+            }, 5);
+        });
+    </script>
+    <link href='http://fonts.googleapis.com/css?family=Yanone+Kaffeesatz:extralight,regular&subset=latin' rel='stylesheet' type='text/css'>
+    <style type="text/css">
+        html { font-family:'Yanone Kaffeesatz', arial, sans-serif; font-weight:200; text-align:center; background-color:white; font-size:0.9em }
+        #about { margin-bottom:40px; margin-top:10px; }
+        h4 { font-size:1.2em; font-weight:400; margin:0; margin-right:50%; text-align:right; border-bottom: 1px solid #ccc; }
+        p { list-style: none; margin: 0; margin-left:50%; padding: 0; text-align:left; }
+        a { padding: 1px 4px; padding-bottom:0; margin: -1px -4px; border-bottom: 1px solid #ccc; color: black; text-decoration:none; }
+        a:hover { padding: 0 3px; border: 1px solid #ccc; background:white; }
+    </style>
+</head>
+<body>
+    <h4>${vid}</h4>
+    <p id="status">${status}</p>
+</body>
+</html>
